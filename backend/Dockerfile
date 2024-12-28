@@ -8,7 +8,8 @@ WORKDIR /app
 COPY requirements.txt /app/
 
 # Install dependencies from the requirements.txt file
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --timeout=3600 --retries=20 --no-cache-dir -r requirements.txt
+
 
 # Copy the entire backend app to the container
 COPY app /app/app
