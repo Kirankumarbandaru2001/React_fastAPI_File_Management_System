@@ -9,3 +9,5 @@ elasticsearch
 unstructured
 python-dotenv
 autogen
+wheel
+python-multipart
