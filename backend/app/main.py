@@ -1,41 +1,60 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from sqlalchemy.orm import Session
-from .core.database import SessionLocal, engine, Base
-from .models.document import Document
-from .services import auth_service, file_storage, document_parser, rag_agent
-
-# Initialize the database
-Base.metadata.create_all(bind=engine)
+from pydantic import BaseModel
+from .database import get_db
+from .models import User, Document
+from .services import process_document, query_with_qa_model, extract_text_from_url
+from .auth import authenticate_user, create_session
+from .database import SessionLocal
 
 app = FastAPI()
 
-# Dependency for database session
-def get_db():
-    db = SessionLocal()
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class QueryRequest(BaseModel):
+    query: str
+
+@app.post("/login")
+def login(credentials: UserLogin, db: Session = Depends(get_db)):
+    user = authenticate_user(db, credentials.username, credentials.password)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    access_token = create_session(user)
+    return {"message": "Login successful", "access_token": access_token}
+
+@app.post("/upload")
+def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        yield db
-    finally:
-        db.close()
+        file_url = process_document(file)
+        document = Document(url=file_url, filename=file.filename, file_type=file.content_type, user_id=user.id)
+        db.add(document)
+        db.commit()
+        return {"message": "Document uploaded successfully", "file_url": file_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/upload/")
-async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Handle document upload."""
-    file_url = file_storage.upload_to_s3(file)
-    parsed_data = document_parser.parse_document(file_url)
-    document = Document(filename=file.filename, file_url=file_url, doc_metadata=parsed_data['content'])
-    db.add(document)
-    db.commit()
-    return {"message": "File uploaded successfully", "document_id": document.id}
 
-@app.post("/query/")
-async def query_document(query: str, db: Session = Depends(get_db)):
-    """Handle querying documents."""
-    response = rag_agent.handle_query(query)
-    return {"response": response}
+@app.post("/query")
+def query_document(query_request: QueryRequest, db: Session = Depends(get_db)):
+    try:
+        # Retrieve the relevant document from the database
+        document = db.query(Document).filter(Document.filename == query_request.query).first()
 
-@app.post("/auth/login")
-def login(username: str, password: str, db: Session = Depends(get_db)):
-    token = auth_service.authenticate_user(username, password, db)
-    if not token:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"access_token": token}
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Extract text from the document URL (S3 or local path)
+        document_text = extract_text_from_url(document.url)
+
+        if not document_text:
+            raise HTTPException(status_code=500, detail="Failed to extract text from the document")
+
+        # Process the query with the RAG agent or QA model
+        answer = query_with_qa_model(query_request.query, document_text)
+
+        return {"response": answer}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
