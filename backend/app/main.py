@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api.v1 import auth, document, query
+from api.v1 import auth, document, query
 
 app = FastAPI()
 
